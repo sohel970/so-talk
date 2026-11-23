@@ -1,0 +1,30 @@
+{
+  "project_info": {
+    "project_number": "442034771475",
+    "firebase_url": "https://what-d2f71-default-rtdb.firebaseio.com",
+    "project_id": "what-d2f71",
+    "storage_bucket": "what-d2f71.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:442034771475:android:3ad8f8c2620823f167d1e6",
+        "android_client_info": {
+          "package_name": "com.adda.chat"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyAZDbJYXvGoAJGxT3NbXCQQ1ys8v-Ar8Vk"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
