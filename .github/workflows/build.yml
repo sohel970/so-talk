@@ -1,0 +1,522 @@
+name: Build So Talk APK
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+      - name: Create Android project
+        run: |
+          set -e
+          LOGO=$(ls *.png | head -1)
+          P=app/src/main
+          mkdir -p $P/java/com/adda/chat $P/res/values $P/assets
+          cp google-services.json app/google-services.json
+          cp index.html $P/assets/index.html
+          cp "$LOGO" $P/assets/logo.png
+          for d in mdpi:48 hdpi:72 xhdpi:96 xxhdpi:144 xxxhdpi:192; do
+            n=${d%%:*}; s=${d##*:}
+            mkdir -p $P/res/mipmap-$n
+            convert "$LOGO" -resize ${s}x${s} $P/res/mipmap-$n/ic_launcher.png
+          done
+
+          cat > settings.gradle <<'EOF'
+          pluginManagement {
+              repositories { google(); mavenCentral(); gradlePluginPortal() }
+          }
+          dependencyResolutionManagement {
+              repositories { google(); mavenCentral() }
+          }
+          rootProject.name = 'SoTalk'
+          include ':app'
+          EOF
+
+          cat > build.gradle <<'EOF'
+          plugins {
+              id 'com.android.application' version '8.5.2' apply false
+              id 'com.google.gms.google-services' version '4.4.2' apply false
+          }
+          EOF
+
+          cat > gradle.properties <<'EOF'
+          android.useAndroidX=true
+          EOF
+
+          cat > app/build.gradle <<'EOF'
+          plugins {
+              id 'com.android.application'
+              id 'com.google.gms.google-services'
+          }
+          android {
+              namespace 'com.adda.chat'
+              compileSdk 34
+              defaultConfig {
+                  applicationId 'com.adda.chat'
+                  minSdk 21
+                  targetSdk 30
+                  versionCode 7
+                  versionName '5.0'
+              }
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_1_8
+                  targetCompatibility JavaVersion.VERSION_1_8
+              }
+          }
+          dependencies {
+              implementation 'com.google.firebase:firebase-messaging:23.4.1'
+          }
+          EOF
+
+          cat > $P/res/values/styles.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <style name="AppTheme" parent="@android:style/Theme.Material.Light.NoActionBar">
+                  <item name="android:statusBarColor">#0a7a36</item>
+                  <item name="android:windowBackground">@android:color/white</item>
+              </style>
+          </resources>
+          EOF
+
+          cat > $P/AndroidManifest.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-permission android:name="android.permission.INTERNET"/>
+              <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
+              <uses-permission android:name="android.permission.CAMERA"/>
+              <uses-permission android:name="android.permission.RECORD_AUDIO"/>
+              <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS"/>
+              <uses-permission android:name="android.permission.VIBRATE"/>
+              <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
+              <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT"/>
+              <uses-permission android:name="android.permission.WAKE_LOCK"/>
+              <uses-feature android:name="android.hardware.camera" android:required="false"/>
+              <uses-feature android:name="android.hardware.microphone" android:required="false"/>
+              <application android:label="So Talk" android:icon="@mipmap/ic_launcher" android:theme="@style/AppTheme"
+                  android:allowBackup="false" android:usesCleartextTraffic="false">
+                  <activity android:name=".MainActivity" android:exported="true"
+                      android:configChanges="orientation|screenSize|keyboardHidden|smallestScreenSize|screenLayout|uiMode"
+                      android:windowSoftInputMode="adjustResize" android:launchMode="singleTop">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN"/>
+                          <category android:name="android.intent.category.LAUNCHER"/>
+                      </intent-filter>
+                  </activity>
+                  <service android:name=".NotifService" android:exported="false"/>
+                  <service android:name=".PushService" android:exported="false">
+                      <intent-filter>
+                          <action android:name="com.google.firebase.MESSAGING_EVENT"/>
+                      </intent-filter>
+                  </service>
+              </application>
+          </manifest>
+          EOF
+
+          cat > $P/java/com/adda/chat/MainActivity.java <<'EOF'
+          package com.adda.chat;
+
+          import android.app.Activity;
+          import android.app.AlertDialog;
+          import android.content.DialogInterface;
+          import android.content.Intent;
+          import android.content.pm.PackageManager;
+          import android.net.Uri;
+          import android.os.Build;
+          import android.os.Bundle;
+          import android.webkit.JsResult;
+          import android.webkit.PermissionRequest;
+          import android.webkit.ValueCallback;
+          import android.webkit.WebChromeClient;
+          import android.webkit.WebView;
+          import com.google.android.gms.tasks.OnSuccessListener;
+          import com.google.firebase.messaging.FirebaseMessaging;
+          import java.util.ArrayList;
+          import java.util.List;
+
+          public class MainActivity extends Activity {
+              WebView web;
+              PermissionRequest pendingReq;
+              ValueCallback<Uri[]> fileCb;
+
+              @Override
+              protected void onCreate(Bundle b) {
+                  super.onCreate(b);
+                  web = new WebView(this);
+                  setContentView(web);
+                  WebSetup.apply(web, this);
+                  web.setWebChromeClient(new WebChromeClient() {
+                      @Override
+                      public void onPermissionRequest(PermissionRequest r) {
+                          List<String> miss = new ArrayList<String>();
+                          for (String res : r.getResources()) {
+                              String perm = null;
+                              if (PermissionRequest.RESOURCE_VIDEO_CAPTURE.equals(res)) perm = "android.permission.CAMERA";
+                              if (PermissionRequest.RESOURCE_AUDIO_CAPTURE.equals(res)) perm = "android.permission.RECORD_AUDIO";
+                              if (perm != null && checkSelfPermission(perm) != PackageManager.PERMISSION_GRANTED) miss.add(perm);
+                          }
+                          if (miss.isEmpty()) r.grant(r.getResources());
+                          else { pendingReq = r; requestPermissions(miss.toArray(new String[0]), 1); }
+                      }
+
+                      @Override
+                      public boolean onShowFileChooser(WebView w, ValueCallback<Uri[]> cb, FileChooserParams p) {
+                          if (fileCb != null) fileCb.onReceiveValue(null);
+                          fileCb = cb;
+                          Intent i = new Intent(Intent.ACTION_GET_CONTENT);
+                          i.addCategory(Intent.CATEGORY_OPENABLE);
+                          i.setType("image/*");
+                          try { startActivityForResult(Intent.createChooser(i, "Choose image"), 2); }
+                          catch (Exception e) { fileCb = null; return false; }
+                          return true;
+                      }
+
+                      @Override
+                      public boolean onJsAlert(WebView v, String url, String msg, final JsResult r) {
+                          new AlertDialog.Builder(MainActivity.this).setMessage(msg)
+                              .setPositiveButton("OK", new DialogInterface.OnClickListener() {
+                                  public void onClick(DialogInterface d, int w) { r.confirm(); }
+                              })
+                              .setOnCancelListener(new DialogInterface.OnCancelListener() {
+                                  public void onCancel(DialogInterface d) { r.cancel(); }
+                              }).show();
+                          return true;
+                      }
+
+                      @Override
+                      public boolean onJsConfirm(WebView v, String url, String msg, final JsResult r) {
+                          new AlertDialog.Builder(MainActivity.this).setMessage(msg)
+                              .setPositiveButton("Yes", new DialogInterface.OnClickListener() {
+                                  public void onClick(DialogInterface d, int w) { r.confirm(); }
+                              })
+                              .setNegativeButton("No", new DialogInterface.OnClickListener() {
+                                  public void onClick(DialogInterface d, int w) { r.cancel(); }
+                              })
+                              .setOnCancelListener(new DialogInterface.OnCancelListener() {
+                                  public void onCancel(DialogInterface d) { r.cancel(); }
+                              }).show();
+                          return true;
+                      }
+                  });
+                  try {
+                      FirebaseMessaging.getInstance().getToken().addOnSuccessListener(new OnSuccessListener<String>() {
+                          @Override
+                          public void onSuccess(String tok) {
+                              getSharedPreferences("push", MODE_PRIVATE).edit().putString("fcm", tok).apply();
+                          }
+                      });
+                  } catch (Exception e) {}
+                  Notif.startService(this);
+                  if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission("android.permission.POST_NOTIFICATIONS") != PackageManager.PERMISSION_GRANTED)
+                      requestPermissions(new String[]{"android.permission.POST_NOTIFICATIONS"}, 3);
+                  web.loadUrl("https://" + WebSetup.HOST + "/index.html");
+              }
+
+              @Override
+              protected void onResume() { super.onResume(); Bridge.foreground = true; }
+
+              @Override
+              protected void onPause() { super.onPause(); Bridge.foreground = false; }
+
+              @Override
+              public void onRequestPermissionsResult(int code, String[] perms, int[] res) {
+                  if (pendingReq == null) return;
+                  boolean all = res.length > 0;
+                  for (int g : res) if (g != PackageManager.PERMISSION_GRANTED) all = false;
+                  if (all) pendingReq.grant(pendingReq.getResources()); else pendingReq.deny();
+                  pendingReq = null;
+              }
+
+              @Override
+              protected void onActivityResult(int req, int res, Intent data) {
+                  if (req == 2 && fileCb != null) {
+                      Uri[] out = null;
+                      if (res == RESULT_OK && data != null && data.getData() != null) out = new Uri[]{data.getData()};
+                      fileCb.onReceiveValue(out);
+                      fileCb = null;
+                  }
+              }
+
+              @Override
+              public void onBackPressed() {
+                  String js = "(function(){var a=document.getElementById('app');if(a&&a.classList.contains('chat')){a.classList.remove('chat');return 1}return 0})()";
+                  web.evaluateJavascript(js, new ValueCallback<String>() {
+                      public void onReceiveValue(String v) { if (!"1".equals(v)) moveTaskToBack(true); }
+                  });
+              }
+          }
+          EOF
+
+          cat > $P/java/com/adda/chat/Bridge.java <<'EOF'
+          package com.adda.chat;
+
+          import android.content.Context;
+          import android.media.AudioManager;
+          import android.webkit.JavascriptInterface;
+
+          public class Bridge {
+              static volatile boolean foreground = false;
+              private final Context ctx;
+
+              Bridge(Context c) { ctx = c; }
+
+              private AudioManager am() { return (AudioManager) ctx.getSystemService(Context.AUDIO_SERVICE); }
+
+              @JavascriptInterface
+              public void setSpeaker(boolean on) {
+                  try { AudioManager a = am(); a.setMode(AudioManager.MODE_IN_COMMUNICATION); a.setSpeakerphoneOn(on); } catch (Exception e) {}
+              }
+
+              @JavascriptInterface
+              public void callEnded() {
+                  try { AudioManager a = am(); a.setSpeakerphoneOn(false); a.setMode(AudioManager.MODE_NORMAL); } catch (Exception e) {}
+              }
+
+              @JavascriptInterface
+              public boolean isForeground() { return foreground; }
+
+              @JavascriptInterface
+              public void showNotice(String tag, String title, String body, boolean call) {
+                  if (foreground) return;
+                  Notif.show(ctx, tag, title, body, call);
+              }
+
+              @JavascriptInterface
+              public void cancelNotice(String tag) { Notif.cancel(ctx, tag); }
+
+              @JavascriptInterface
+              public String getToken() {
+                  return ctx.getSharedPreferences("push", Context.MODE_PRIVATE).getString("fcm", "");
+              }
+          }
+          EOF
+
+          cat > $P/java/com/adda/chat/Notif.java <<'EOF'
+          package com.adda.chat;
+
+          import android.app.Notification;
+          import android.app.NotificationManager;
+          import android.app.PendingIntent;
+          import android.app.Service;
+          import android.content.Context;
+          import android.content.Intent;
+          import android.os.Build;
+
+          class Notif {
+              static NotificationManager nm(Context c) {
+                  return (NotificationManager) c.getSystemService(Context.NOTIFICATION_SERVICE);
+              }
+
+              static void channel(Context c, String id, String name, int importance) throws Exception {
+                  if (Build.VERSION.SDK_INT < 26) return;
+                  Class<?> cc = Class.forName("android.app.NotificationChannel");
+                  Object ch = cc.getConstructor(String.class, CharSequence.class, int.class).newInstance(id, name, importance);
+                  NotificationManager.class.getMethod("createNotificationChannel", cc).invoke(nm(c), ch);
+              }
+
+              static Notification.Builder builder(Context c, String ch) throws Exception {
+                  if (Build.VERSION.SDK_INT >= 26)
+                      return (Notification.Builder) Notification.Builder.class.getConstructor(Context.class, String.class).newInstance(c, ch);
+                  return new Notification.Builder(c);
+              }
+
+              static void show(Context c, String tag, String title, String body, boolean call) {
+                  try {
+                      channel(c, "calls", "Calls", 4);
+                      channel(c, "msgs", "Messages", 3);
+                      Intent i = new Intent(c, MainActivity.class);
+                      i.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_SINGLE_TOP);
+                      PendingIntent pi = PendingIntent.getActivity(c, tag.hashCode(), i,
+                              PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+                      Notification.Builder b = builder(c, call ? "calls" : "msgs");
+                      b.setSmallIcon(android.R.drawable.stat_notify_chat)
+                       .setContentTitle(title).setContentText(body)
+                       .setContentIntent(pi).setAutoCancel(true);
+                      if (call) {
+                          b.setFullScreenIntent(pi, true);
+                          b.setDefaults(Notification.DEFAULT_ALL);
+                      } else {
+                          b.setDefaults(Notification.DEFAULT_SOUND);
+                      }
+                      nm(c).notify(tag, 1, b.build());
+                  } catch (Exception e) {}
+              }
+
+              static void cancel(Context c, String tag) {
+                  try { nm(c).cancel(tag, 1); } catch (Exception e) {}
+              }
+
+              static void startService(Context c) {
+                  Intent i = new Intent(c, NotifService.class);
+                  try {
+                      if (Build.VERSION.SDK_INT >= 26)
+                          Context.class.getMethod("startForegroundService", Intent.class).invoke(c, i);
+                      else
+                          c.startService(i);
+                  } catch (Exception e) {
+                      try { c.startService(i); } catch (Exception ignored) {}
+                  }
+              }
+
+              static void fg(Service s, Notification n) {
+                  s.startForeground(1, n);
+              }
+          }
+          EOF
+
+          cat > $P/java/com/adda/chat/NotifService.java <<'EOF'
+          package com.adda.chat;
+
+          import android.app.Notification;
+          import android.app.PendingIntent;
+          import android.app.Service;
+          import android.content.Intent;
+          import android.os.IBinder;
+          import android.webkit.WebView;
+
+          public class NotifService extends Service {
+              private WebView wv;
+
+              @Override
+              public void onCreate() {
+                  super.onCreate();
+                  try {
+                      Notif.channel(this, "svc", "So Talk", 2);
+                      PendingIntent pi = PendingIntent.getActivity(this, 0, new Intent(this, MainActivity.class),
+                              PendingIntent.FLAG_IMMUTABLE);
+                      Notification n = Notif.builder(this, "svc")
+                              .setSmallIcon(android.R.drawable.stat_notify_chat)
+                              .setContentTitle("So Talk")
+                              .setContentText("বার্তা ও কলের জন্য সক্রিয়")
+                              .setContentIntent(pi)
+                              .setOngoing(true)
+                              .build();
+                      Notif.fg(this, n);
+                  } catch (Exception e) {}
+                  wv = new WebView(this);
+                  WebSetup.apply(wv, this);
+                  wv.loadUrl("https://" + WebSetup.HOST + "/index.html");
+                  wv.onResume();
+                  wv.resumeTimers();
+              }
+
+              @Override
+              public void onTaskRemoved(Intent rootIntent) {
+                  try {
+                      android.app.AlarmManager am = (android.app.AlarmManager) getSystemService(ALARM_SERVICE);
+                      PendingIntent pi = PendingIntent.getService(this, 2, new Intent(this, NotifService.class),
+                              PendingIntent.FLAG_ONE_SHOT | PendingIntent.FLAG_IMMUTABLE);
+                      am.set(android.app.AlarmManager.RTC_WAKEUP, System.currentTimeMillis() + 1500, pi);
+                  } catch (Exception e) {}
+                  super.onTaskRemoved(rootIntent);
+              }
+
+              @Override
+              public int onStartCommand(Intent i, int f, int s) { return START_STICKY; }
+
+              @Override
+              public IBinder onBind(Intent i) { return null; }
+
+              @Override
+              public void onDestroy() {
+                  if (wv != null) wv.destroy();
+                  super.onDestroy();
+              }
+          }
+          EOF
+
+          cat > $P/java/com/adda/chat/WebSetup.java <<'EOF'
+          package com.adda.chat;
+
+          import android.content.Context;
+          import android.content.Intent;
+          import android.net.Uri;
+          import android.webkit.WebResourceRequest;
+          import android.webkit.WebResourceResponse;
+          import android.webkit.WebSettings;
+          import android.webkit.WebView;
+          import android.webkit.WebViewClient;
+          import java.io.ByteArrayInputStream;
+          import java.io.IOException;
+          import java.util.HashMap;
+
+          class WebSetup {
+              static final String HOST = "appassets.androidplatform.net";
+
+              static String mime(String p) {
+                  if (p.endsWith(".html")) return "text/html";
+                  if (p.endsWith(".js")) return "text/javascript";
+                  if (p.endsWith(".png")) return "image/png";
+                  return "application/octet-stream";
+              }
+
+              static void apply(WebView w, final Context ctx) {
+                  WebSettings s = w.getSettings();
+                  s.setJavaScriptEnabled(true);
+                  s.setDomStorageEnabled(true);
+                  s.setDatabaseEnabled(true);
+                  s.setMediaPlaybackRequiresUserGesture(false);
+                  s.setAllowFileAccess(false);
+                  w.addJavascriptInterface(new Bridge(ctx), "Android");
+                  w.setWebViewClient(new WebViewClient() {
+                      @Override
+                      public WebResourceResponse shouldInterceptRequest(WebView v, WebResourceRequest r) {
+                          Uri u = r.getUrl();
+                          if (!HOST.equals(u.getHost())) return null;
+                          String p = u.getPath();
+                          if (p == null || p.equals("/")) p = "/index.html";
+                          p = p.substring(1);
+                          try {
+                              return new WebResourceResponse(mime(p), "utf-8", ctx.getAssets().open(p));
+                          } catch (IOException e) {
+                              return new WebResourceResponse("text/plain", "utf-8", 404, "Not Found",
+                                      new HashMap<String, String>(), new ByteArrayInputStream(new byte[0]));
+                          }
+                      }
+                  });
+              }
+          }
+          EOF
+
+          cat > $P/java/com/adda/chat/PushService.java <<'EOF'
+          package com.adda.chat;
+
+          import com.google.firebase.messaging.FirebaseMessagingService;
+          import com.google.firebase.messaging.RemoteMessage;
+          import java.util.Map;
+
+          public class PushService extends FirebaseMessagingService {
+              @Override
+              public void onNewToken(String token) {
+                  getSharedPreferences("push", MODE_PRIVATE).edit().putString("fcm", token).apply();
+              }
+
+              @Override
+              public void onMessageReceived(RemoteMessage m) {
+                  if (Bridge.foreground) return;
+                  Map<String, String> d = m.getData();
+                  String tag = d.containsKey("tag") ? d.get("tag") : "push" + System.currentTimeMillis();
+                  String title = d.containsKey("title") ? d.get("title") : "So Talk";
+                  String body = d.containsKey("body") ? d.get("body") : "";
+                  boolean call = "1".equals(d.get("call"));
+                  Notif.show(this, tag, title, body, call);
+              }
+          }
+          EOF
+
+      - name: Build APK
+        run: gradle :app:assembleDebug --no-daemon
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: So-Talk-APK
+          path: app/build/outputs/apk/debug/app-debug.apk
