@@ -27,7 +27,7 @@ jobs:
           for d in mdpi:48 hdpi:72 xhdpi:96 xxhdpi:144 xxxhdpi:192; do
             n=${d%%:*}; s=${d##*:}
             mkdir -p $P/res/mipmap-$n
-            convert "$LOGO" -resize ${s}x${s} $P/res/mipmap-$n/ic_launcher.png
+            cp "$LOGO" $P/res/mipmap-$n/ic_launcher.png
           done
 
           cat > settings.gradle <<'EOF'
