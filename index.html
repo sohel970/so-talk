@@ -388,7 +388,7 @@ const ping = () => me && setDoc(doc(db, "users", me.uid), { lastSeen: Date.now()
 function start() {
   myKey = me.email.split("@")[0];
   setDoc(doc(db, "phones", myKey), { uid: me.uid }).catch(() => {});
-  ping(); beat = setInterval(() => { ping(); renderUsers(); }, 30000); tick = setInterval(renderHead, 2000);
+  ping(); saveTok(); beat = setInterval(() => { ping(); renderUsers(); saveTok(); }, 30000); tick = setInterval(renderHead, 2000);
   subs.push(onSnapshot(doc(db, "users", me.uid), s => { profile = { id: me.uid, ...s.data() }; renderMe(); }));
   subs.push(onSnapshot(collection(db, "users", me.uid, "contacts"), s => s.docs.forEach(d => watchPeer(d.id))));
   subs.push(onSnapshot(query(collection(db, "calls"), where("participants", "array-contains", me.uid)), s =>
@@ -532,6 +532,7 @@ async function sendTo(pid, o) {
   await addDoc(collection(db, "chats", id, "messages"), { from: me.uid, text: o.text || "", img: o.img || "", aud: o.aud || "", reply: o.reply || "", reactions: {}, call: !!o.call, seen: false, createdAt: serverTimestamp() });
   await setDoc(doc(db, "chats", id), { last: o.text || (o.img ? "📷 " + t("photo") : "🎤 " + t("voice")), lastAt: Date.now(), lastFrom: me.uid, ["unread_" + pid]: increment(1) }, { merge: true });
   if (!(meta[pid] || {}).lastAt) setDoc(doc(db, "users", pid, "contacts", me.uid), { t: Date.now() }, { merge: true }).catch(() => {});
+  if (!o.call) pushTo(pid, { title: profile.name || "So Talk", body: o.text || (o.img ? t("photo") : t("voice")), tag: id + Date.now() });
 }
 const swapBtn = () => { const h = !!$("txt").value.trim(); $("mbtn").classList.toggle("hidden", h); $("sbtn").classList.toggle("hidden", !h); };
 $("send").onsubmit = e => {
@@ -720,6 +721,7 @@ async function startCall(video) {
   setupPC(); const o = await pc.createOffer(); await pc.setLocalDescription(o);
   await setDoc(callRef, { from: me.uid, to: peer.id, participants: [me.uid, peer.id], fromName: profile.name || "", video, offer: { type: o.type, sdp: o.sdp }, status: "ringing", callerCands: [], calleeCands: [], t: Date.now() });
   ready(); watchCall();
+  pushTo(peer.id, { title: profile.name || "So Talk", body: t(video ? "incVideo" : "incAudio"), tag: "call" + callRef.id, call: true });
   const p = pc; setTimeout(() => { if (pc === p && !connectedAt) { alert(t("notConnected")); endCall(true); } }, 30000);
 }
 function showIncoming(d) {
@@ -771,6 +773,25 @@ $("cflip").onclick = async () => {
 let notifSubs = {}, spk = true;
 function isFg() { try { return !window.Android || Android.isForeground(); } catch { return true; } }
 function notifyNative(tag, title, body, call) { try { window.Android && Android.showNotice(tag, title, body, !!call); } catch {} }
+const PUSH_URL = "https://sotalk-push.sohelrana12a12.workers.dev/";
+function saveTok() {
+  try {
+    const tk = window.Android && Android.getToken();
+    if (tk && me) setDoc(doc(db, "users", me.uid), { fcmToken: tk }, { merge: true }).catch(() => {});
+  } catch {}
+}
+async function pushTo(pid, payload) {
+  try {
+    const target = peers[pid] || {};
+    if (!target.fcmToken || !me) return;
+    const idToken = await me.getIdToken();
+    await fetch(PUSH_URL, {
+      method: "POST",
+      headers: { "Authorization": "Bearer " + idToken, "Content-Type": "application/json" },
+      body: JSON.stringify({ token: target.fcmToken, ...payload })
+    });
+  } catch {}
+}
 function setSpk(on) { spk = on; $("cspk").classList.toggle("off", !on); try { window.Android && Android.setSpeaker(on); } catch {} }
 $("cspk").onclick = () => setSpk(!spk);
 
